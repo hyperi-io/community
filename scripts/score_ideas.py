@@ -24,7 +24,7 @@ query($owner: String!, $name: String!, $after: String) {
     ) {
       pageInfo { hasNextPage endCursor }
       nodes {
-        id number upvoteCount category { name }
+        id number title url upvoteCount category { name }
         reactions(content: THUMBS_UP, first: 100) {
           nodes { user { login createdAt
             contributionsCollection { contributionCalendar { totalContributions } } } }
@@ -58,6 +58,8 @@ class Rules:
         min_account_days: Youngest account age whose vote counts.
         min_contributions: Fewest contributions in the last year whose vote counts.
         customer_weight: How many times a customer's vote counts.
+        issue_threshold: Score at which an idea gets a tracked issue.
+        issue_label: Label on those issues.
 
     """
 
@@ -65,6 +67,8 @@ class Rules:
     min_account_days: int
     min_contributions: int
     customer_weight: int
+    issue_threshold: int = 10
+    issue_label: str = "community-idea"
 
 
 @dataclass(frozen=True, slots=True)
@@ -121,6 +125,8 @@ def load_rules(path: Path) -> Rules:
         min_account_days=int(raw["min_account_days"]),
         min_contributions=int(raw["min_contributions_last_year"]),
         customer_weight=int(raw["customer_weight"]),
+        issue_threshold=int(raw.get("issue_threshold", 10)),
+        issue_label=str(raw.get("issue_label", "community-idea")),
     )
     if rules.min_account_days < 0 or rules.min_contributions < 0:
         raise ValueError("thresholds must not be negative")
@@ -192,6 +198,50 @@ def render(result: Score, now: datetime) -> str:
         "Votes count from accounts with some GitHub history. "
         f"Scored {now:%Y-%m-%d}."
     )
+
+
+def issue_body(title: str, url: str, result: Score) -> str:
+    """Write the tracked issue's body, keyed to the discussion by its URL."""
+    return (
+        f"<!-- hyperi-idea: {url} -->\n"
+        f"Community idea: [{title}]({url})\n\n"
+        f"**Community score: {result.points}** ({result.qualified} qualified votes, "
+        f"{result.from_customers} from customers). Vote and discuss on the idea. "
+        "This issue tracks it for planning."
+    )
+
+
+def rest(token: str, method: str, path: str, payload: Mapping | None = None) -> object:
+    """Call the GitHub REST API and return the decoded JSON."""
+    request = urllib.request.Request(  # noqa: S310
+        f"https://api.github.com{path}",
+        data=json.dumps(dict(payload)).encode() if payload is not None else None,
+        method=method,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/vnd.github+json",
+            "Content-Type": "application/json",
+        },
+    )
+    with urllib.request.urlopen(request, timeout=30) as response:  # noqa: S310
+        return json.load(response)
+
+
+def track(token: str, repo: str, rules: Rules, idea: Mapping, result: Score) -> None:
+    """Open or update the idea's tracked issue once it reaches the threshold."""
+    if result.points < rules.issue_threshold:
+        return
+    query = f"/repos/{repo}/issues?labels={rules.issue_label}&state=all&per_page=100"
+    marker = f"<!-- hyperi-idea: {idea['url']} -->"
+    existing = [i for i in rest(token, "GET", query) if marker in (i.get("body") or "")]
+    body = issue_body(idea["title"], idea["url"], result)
+    if not existing:
+        title = f"Idea: {idea['title']}"
+        new = {"title": title, "body": body, "labels": [rules.issue_label]}
+        rest(token, "POST", f"/repos/{repo}/issues", new)
+    elif existing[0]["body"] != body:
+        number = existing[0]["number"]
+        rest(token, "PATCH", f"/repos/{repo}/issues/{number}", {"body": body})
 
 
 def voters_from(reactions: Iterable[Mapping]) -> list[Voter]:
@@ -290,6 +340,7 @@ def run(
             if write_score(token, idea, render(result, now)):
                 written += 1
                 logger.info("idea #%s scored %s", idea["number"], result.points)
+            track(token, repo, rules, idea, result)
         page_info = page["discussions"]["pageInfo"]
         if not page_info["hasNextPage"]:
             return written

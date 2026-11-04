@@ -9,11 +9,13 @@ from score_ideas import (
     Rules,
     Score,
     Voter,
+    issue_body,
     load_rules,
     parse_customers,
     qualifies,
     render,
     score,
+    track,
     voters_from,
 )
 
@@ -143,3 +145,16 @@ def test_missing_threshold_is_refused(tmp_path):
     path.write_text('category = "Ideas"\n', encoding="utf-8")
     with pytest.raises(KeyError):
         load_rules(path)
+
+
+def test_issue_body_keys_on_discussion_url():
+    body = issue_body("Faster ingest", "https://x/d/1", Score(12, 6, 2, 9))
+    assert body.startswith("<!-- hyperi-idea: https://x/d/1 -->")
+    assert "**Community score: 12**" in body
+
+
+@pytest.mark.parametrize("points", [0, 9])
+def test_below_threshold_opens_no_issue(points):
+    # No token and no network: anything past the threshold check would raise.
+    idea = {"title": "t", "url": "u"}
+    assert track("", "o/r", RULES, idea, Score(points, 0, 0, 0)) is None

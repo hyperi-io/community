@@ -7,3 +7,7 @@ min_contributions_last_year = 5
 # A thumbs-up from a customer's GitHub login counts this many times.
 # The logins come from the CUSTOMER_GITHUB_LOGINS secret, never this file, because the repo is public.
 customer_weight = 3
+
+# An idea scoring this or more gets one tracked issue with this label, which pm sync puts on the board.
+issue_threshold = 10
+issue_label = "community-idea"
