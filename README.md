@@ -1,6 +1,6 @@
 # HyperI community
 
-Ask questions, share what you've built and suggest ideas for Data Fusion Engine and Edge Stream Hub in [Discussions](https://github.com/orgs/hyperi-io/discussions).
+Ask questions, share what you've built and suggest ideas for Data Fusion Engine and Edge Stream Hub in [Discussions](https://github.com/hyperi-io/community/discussions).
 
 ## Voting on ideas
 

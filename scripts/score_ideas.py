@@ -5,6 +5,7 @@ import logging
 import os
 import sys
 import tomllib
+import urllib.error
 import urllib.request
 from collections.abc import Iterable, Mapping, Set
 from dataclasses import dataclass
@@ -273,7 +274,14 @@ def field_id(token: str, org: str, name: str) -> int:
         MissingFieldError: If the org has no issue field with that name.
 
     """
-    for field in rest(token, "GET", f"/orgs/{org}/issue-fields"):
+    try:
+        fields = rest(token, "GET", f"/orgs/{org}/issue-fields")
+    except urllib.error.HTTPError as error:
+        # 403 means the app has not been granted the org's issue fields yet.
+        if error.code != 403:
+            raise
+        raise MissingFieldError(f"app cannot read {org} issue fields") from error
+    for field in fields:
         if field["name"] == name:
             return int(field["id"])
     raise MissingFieldError(f"no '{name}' issue field in {org}")
