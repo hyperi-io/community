@@ -1,0 +1,9 @@
+# Thresholds for the idea scorer. A thumbs-up counts only from an account that meets both minimums.
+
+category = "Ideas"
+min_account_days = 90
+min_contributions_last_year = 5
+
+# A thumbs-up from a customer's GitHub login counts this many times.
+# The logins come from the CUSTOMER_GITHUB_LOGINS secret, never this file, because the repo is public.
+customer_weight = 3
