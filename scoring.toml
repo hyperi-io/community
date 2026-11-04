@@ -11,3 +11,16 @@ customer_weight = 3
 # An idea scoring this or more gets one tracked issue with this label, which pm sync puts on the board.
 issue_threshold = 10
 issue_label = "community-idea"
+
+# Thumbs-up votes on open public issues across the org are scored the same way into this org issue field.
+score_field = "Community score"
+# EdgeStream Hub and the repos its team owns are never scored.
+exclude_prefixes = ["edgestream-", "edge-"]
+exclude_repos = [
+  "flow-collector",
+  "dev-office365-audit-log-collector",
+  "collector-api",
+  "collector-dashboard",
+  "collector-aws-vpn-client",
+  "vflow",
+]

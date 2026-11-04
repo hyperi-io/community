@@ -36,6 +36,23 @@ query($owner: String!, $name: String!, $after: String) {
 }
 """
 
+ISSUES_QUERY = """
+query($q: String!, $after: String) {
+  search(type: ISSUE, query: $q, first: 50, after: $after) {
+    pageInfo { hasNextPage endCursor }
+    nodes {
+      ... on Issue {
+        number repository { nameWithOwner }
+        reactions(content: THUMBS_UP, first: 100) {
+          nodes { user { login createdAt
+            contributionsCollection { contributionCalendar { totalContributions } } } }
+        }
+      }
+    }
+  }
+}
+"""
+
 ADD_COMMENT = """
 mutation($id: ID!, $body: String!) {
   addDiscussionComment(input: {discussionId: $id, body: $body}) { comment { id } }
@@ -49,6 +66,10 @@ mutation($id: ID!, $body: String!) {
 """
 
 
+class MissingFieldError(LookupError):
+    """The org has not created the issue field scores are written to."""
+
+
 @dataclass(frozen=True, slots=True)
 class Rules:
     """Scoring thresholds from scoring.toml.
@@ -60,6 +81,9 @@ class Rules:
         customer_weight: How many times a customer's vote counts.
         issue_threshold: Score at which an idea gets a tracked issue.
         issue_label: Label on those issues.
+        score_field: Org issue field that holds an issue's score.
+        exclude_repos: Repos whose issues are never scored.
+        exclude_prefixes: Repo name prefixes whose issues are never scored.
 
     """
 
@@ -69,6 +93,9 @@ class Rules:
     customer_weight: int
     issue_threshold: int = 10
     issue_label: str = "community-idea"
+    score_field: str = "Community score"
+    exclude_repos: frozenset[str] = frozenset()
+    exclude_prefixes: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -127,6 +154,9 @@ def load_rules(path: Path) -> Rules:
         customer_weight=int(raw["customer_weight"]),
         issue_threshold=int(raw.get("issue_threshold", 10)),
         issue_label=str(raw.get("issue_label", "community-idea")),
+        score_field=str(raw.get("score_field", "Community score")),
+        exclude_repos=frozenset(raw.get("exclude_repos", ())),
+        exclude_prefixes=tuple(raw.get("exclude_prefixes", ())),
     )
     if rules.min_account_days < 0 or rules.min_contributions < 0:
         raise ValueError("thresholds must not be negative")
@@ -221,10 +251,85 @@ def rest(token: str, method: str, path: str, payload: Mapping | None = None) -> 
             "Authorization": f"Bearer {token}",
             "Accept": "application/vnd.github+json",
             "Content-Type": "application/json",
+            "X-GitHub-Api-Version": "2026-03-10",
         },
     )
     with urllib.request.urlopen(request, timeout=30) as response:  # noqa: S310
-        return json.load(response)
+        raw = response.read()
+    return json.loads(raw) if raw else None
+
+
+def in_scope(repo: str, rules: Rules) -> bool:
+    """Return True for a repo whose issues are scored, never an excluded one."""
+    name = repo.split("/", 1)[1]
+    excluded = name in rules.exclude_repos
+    return not excluded and not name.startswith(tuple(rules.exclude_prefixes))
+
+
+def field_id(token: str, org: str, name: str) -> int:
+    """Find the org issue field the issue scores are written to.
+
+    Raises:
+        MissingFieldError: If the org has no issue field with that name.
+
+    """
+    for field in rest(token, "GET", f"/orgs/{org}/issue-fields"):
+        if field["name"] == name:
+            return int(field["id"])
+    raise MissingFieldError(f"no '{name}' issue field in {org}")
+
+
+def write_field(token: str, repo: str, number: int, field: int, points: int) -> bool:
+    """Set the issue's score field.
+
+    Returns:
+        False when the field already holds that score.
+
+    """
+    path = f"/repos/{repo}/issues/{number}/issue-field-values"
+    current = rest(token, "GET", path) or []
+    held = [v.get("value") for v in current if v.get("issue_field_id") == field]
+    if held and held[0] is not None and float(held[0]) == points:
+        return False
+    values = {"issue_field_values": [{"field_id": field, "value": points}]}
+    rest(token, "POST", path, values)
+    return True
+
+
+def score_issues(
+    token: str,
+    org: str,
+    rules: Rules,
+    customers: Set[str],
+    now: datetime,
+) -> int:
+    """Score thumbs-up votes on open public issues and write each to the org field.
+
+    Returns:
+        How many issue fields were set.
+
+    """
+    # SHORTCUT: an issue whose last vote is withdrawn keeps its old score.
+    # upgrade: once someone asks, also list issues by field value and zero them.
+    field = field_id(token, org, rules.score_field)
+    query = f"org:{org} is:issue is:open is:public reactions:>=1"
+    written = 0
+    after = None
+    while True:
+        variables = {"q": query, "after": after}
+        page = graphql(token, ISSUES_QUERY, variables)["search"]
+        for issue in page["nodes"]:
+            repo = issue["repository"]["nameWithOwner"]
+            if not in_scope(repo, rules):
+                continue
+            voters = voters_from(issue["reactions"]["nodes"])
+            result = score(voters, 0, customers, rules, now)
+            if write_field(token, repo, issue["number"], field, result.points):
+                written += 1
+                logger.info("%s#%s scored %s", repo, issue["number"], result.points)
+        if not page["pageInfo"]["hasNextPage"]:
+            return written
+        after = page["pageInfo"]["endCursor"]
 
 
 def track(token: str, repo: str, rules: Rules, idea: Mapping, result: Score) -> None:
@@ -354,8 +459,21 @@ def main() -> int:
     customers = parse_customers(os.environ.get("CUSTOMER_GITHUB_LOGINS", ""))
     token = os.environ["GITHUB_TOKEN"]
     repo = os.environ["GITHUB_REPOSITORY"]
-    written = run(token, repo, rules, customers, datetime.now(UTC))
+    now = datetime.now(UTC)
+    written = run(token, repo, rules, customers, now)
     logger.info("updated %d score comments", written)
+    # Issue scores need the org app's token, which reaches repos beyond this one.
+    app_token = os.environ.get("APP_TOKEN", "")
+    if not app_token:
+        logger.warning("APP_TOKEN unset, issue scores skipped")
+        return 0
+    org = repo.split("/", 1)[0]
+    try:
+        fields = score_issues(app_token, org, rules, customers, now)
+    except MissingFieldError as error:
+        logger.warning("%s, issue scores skipped", error)
+        return 0
+    logger.info("updated %d issue score fields", fields)
     return 0
 
 

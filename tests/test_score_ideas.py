@@ -9,6 +9,7 @@ from score_ideas import (
     Rules,
     Score,
     Voter,
+    in_scope,
     issue_body,
     load_rules,
     parse_customers,
@@ -120,9 +121,13 @@ def test_deleted_accounts_are_skipped():
 
 def test_shipped_rules_load():
     rules = load_rules(Path(__file__).resolve().parent.parent / "scoring.toml")
-    assert rules == Rules(
-        category="Ideas", min_account_days=90, min_contributions=5, customer_weight=3
+    assert (rules.category, rules.min_account_days, rules.min_contributions) == (
+        "Ideas",
+        90,
+        5,
     )
+    assert (rules.customer_weight, rules.issue_threshold) == (3, 10)
+    assert rules.score_field == "Community score"
 
 
 @pytest.mark.parametrize(
@@ -158,3 +163,20 @@ def test_below_threshold_opens_no_issue(points):
     # No token and no network: anything past the threshold check would raise.
     idea = {"title": "t", "url": "u"}
     assert track("", "o/r", RULES, idea, Score(points, 0, 0, 0)) is None
+
+
+@pytest.mark.parametrize(
+    ("repo", "expected"),
+    [
+        ("hyperi-io/dfe-engine", True),
+        ("hyperi-io/scalo-rs", True),
+        ("hyperi-io/edgestream-hub", False),
+        ("hyperi-io/edge-shared-ci", False),
+        ("hyperi-io/flow-collector", False),
+        ("hyperi-io/vflow", False),
+        ("hyperi-io/flow-collector-docs", True),
+    ],
+)
+def test_edge_repos_are_never_scored(repo, expected):
+    rules = load_rules(Path(__file__).resolve().parent.parent / "scoring.toml")
+    assert in_scope(repo, rules) is expected

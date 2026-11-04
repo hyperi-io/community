@@ -10,4 +10,6 @@ A thumbs-up counts when the account is at least 90 days old and has 5 or more Gi
 
 An idea that scores 10 or more gets a tracked issue labelled `community-idea`, which puts it on our planning board. The issue links back to the idea and its score updates daily.
 
+A thumbs-up on an open issue in any public hyperi-io repo counts the same way. The daily run writes the score to the issue's Community score field, which we sort by when we set priorities.
+
 The thresholds live in `scoring.toml`. The scorer is `scripts/score_ideas.py`, run by `.github/workflows/score-ideas.yml`.
